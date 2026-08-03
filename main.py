@@ -350,7 +350,7 @@ def _do_merge(session_id: str, video_url: str, audio_url: str,
 
 @app.route("/merge", methods=["POST"])
 def merge_video_audio():
-    """异步合并视频和音频（立即返回，后台处理）"""
+    """合并视频和音频（同步模式，直接返回结果）"""
     data = request.get_json(silent=True) or {}
 
     video_url = data.get("videoUrl", "").strip()
@@ -373,21 +373,15 @@ def merge_video_audio():
 
     base_url = request.host_url.rstrip("/")
 
-    # 启动后台线程
-    t = threading.Thread(
-        target=_do_merge,
-        args=(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url),
-        daemon=True,
-    )
-    t.start()
-
-    # 立即返回
-    return jsonify({
-        "status": "processing",
-        "message": "任务已接收，正在后台处理",
-        "task_id": session_id,
-        "status_url": f"{base_url}/status/{session_id}",
-    })
+    # 同步执行合并
+    try:
+        _do_merge(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url)
+        result = _task_status.get(session_id, {})
+        return jsonify(result)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "合并超时，视频可能过大"}), 500
+    except Exception as e:
+        return jsonify({"error": f"处理异常: {str(e)}"}), 500
 
 
 @app.route("/status/<task_id>", methods=["GET"])
