@@ -140,12 +140,18 @@ def openapi_spec():
                     },
                     "responses": {
                         "200": {
-                            "description": "合并成功，返回视频文件",
+                            "description": "合并成功，返回下载信息",
                             "content": {
-                                "video/mp4": {
+                                "application/json": {
                                     "schema": {
-                                        "type": "string",
-                                        "format": "binary",
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string"},
+                                            "message": {"type": "string"},
+                                            "task_id": {"type": "string"},
+                                            "video_size_mb": {"type": "number"},
+                                            "download_url": {"type": "string"},
+                                        }
                                     }
                                 }
                             },
@@ -293,12 +299,16 @@ def merge_video_audio():
         if not output_path.exists():
             return jsonify({"error": "合并后未生成输出文件"}), 500
 
-        return send_file(
-            str(output_path),
-            mimetype="video/mp4",
-            as_attachment=True,
-            download_name="merged_video.mp4",
-        )
+        # 返回 JSON，包含下载链接（Coze 插件需要结构化响应）
+        video_size = output_path.stat().st_size
+        download_url = f"{request.host_url.rstrip('/')}/download/{session_id}"
+        return jsonify({
+            "status": "success",
+            "message": "视频音频合并成功",
+            "task_id": session_id,
+            "video_size_mb": round(video_size / (1024 * 1024), 2),
+            "download_url": download_url,
+        })
 
     except subprocess.TimeoutExpired:
         return jsonify({"error": "合并超时，视频可能过大"}), 500
@@ -307,6 +317,20 @@ def merge_video_audio():
     finally:
         # 清理临时文件（可选，保留方便调试）
         pass
+
+
+@app.route("/download/<session_id>", methods=["GET"])
+def download_video(session_id):
+    """下载合并后的视频文件"""
+    output_path = WORK_DIR / session_id / "output.mp4"
+    if not output_path.exists():
+        return jsonify({"error": "文件不存在或已过期"}), 404
+    return send_file(
+        str(output_path),
+        mimetype="video/mp4",
+        as_attachment=True,
+        download_name="merged_video.mp4",
+    )
 
 
 if __name__ == "__main__":
