@@ -1,0 +1,8 @@
+work/
+__pycache__/
+*.pyc
+.env
+*.bat
+serveo_output.txt
+tunnel_output.txt
+*.zip

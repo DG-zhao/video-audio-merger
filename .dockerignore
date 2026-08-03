@@ -1,0 +1,8 @@
+work/
+__pycache__/
+*.pyc
+.env
+*.bat
+*.txt
+*.zip
+README.md
