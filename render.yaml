@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: video-audio-merger
+    env: docker
+    repo: https://github.com/DG-zhao/video-audio-merger
+    plan: free
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "10000"
