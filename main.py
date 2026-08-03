@@ -31,19 +31,15 @@ _task_status: dict = {}  # task_id -> {"status": "processing|success|error", "da
 
 def find_ffmpeg():
     """查找 ffmpeg 路径"""
-    # 优先从环境变量找
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         return ffmpeg_path
-    # 常见 Windows 安装路径（含 winget 安装路径）
     candidates = [
         Path("C:/Program Files/ffmpeg/bin/ffmpeg.exe"),
         Path("C:/ffmpeg/bin/ffmpeg.exe"),
         Path.home() / "ffmpeg/bin/ffmpeg.exe",
-        # winget 安装路径
         Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin/ffmpeg.exe",
     ]
-    # 自动搜索 WinGet 目录下的 ffmpeg（版本号可能变化）
     winget_base = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/WinGet/Packages"
     if winget_base.exists():
         for d in winget_base.iterdir():
@@ -53,7 +49,6 @@ def find_ffmpeg():
                     exe = bin_dir / "ffmpeg.exe"
                     if exe.exists():
                         candidates.insert(0, str(exe))
-                # 也搜索子目录
                 for sub in d.rglob("ffmpeg.exe"):
                     candidates.insert(0, str(sub))
     for p in candidates:
@@ -85,38 +80,31 @@ def resolve_storage_to_url(share_url: str) -> str:
     try:
         parsed = urlparse(share_url)
         if "storage.to" not in parsed.netloc:
-            return share_url  # 不是 storage.to，不处理
+            return share_url
 
-        # 获取分享页面
         resp = requests.get(share_url, timeout=30, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         resp.raise_for_status()
         html = resp.text
 
-        # 提取 stusercontent.com 直链（排除 thumbnails 路径）
-        # 格式: stusercontent.com/<uuid>?expires=...&sig=...
         pattern = r'stusercontent\.com/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\?[^"\'<>\s]+)'
         matches = re.findall(pattern, html)
         if not matches:
-            return share_url  # 没找到直链，保持原 URL
+            return share_url
 
-        # 取第一个匹配（排除重复的 \u0026 版本）
         dirty_url = matches[0]
-        # 清理 \u0026 和 &amp; → &
         clean_url = dirty_url.replace("\\u0026", "&").replace("&amp;", "&")
         direct_url = f"https://stusercontent.com/{clean_url}"
-
         return direct_url
     except Exception:
-        return share_url  # 解析失败，用原 URL 尝试下载
+        return share_url
 
 
 def download_file(url: str, dest: str) -> tuple:
     """下载文件，带大小限制和进度。返回 (success, error_message)"""
     actual_url = url
     try:
-        # 自动解析 storage.to 等分享链接为直链
         actual_url = resolve_storage_to_url(url)
         if actual_url != url:
             print(f"[INFO] 已解析 storage.to 直链: {actual_url[:80]}...")
@@ -126,7 +114,6 @@ def download_file(url: str, dest: str) -> tuple:
         })
         resp.raise_for_status()
 
-        # 检查 Content-Type，避免下载到 HTML 页面
         content_type = resp.headers.get("Content-Type", "").lower()
         if "text/html" in content_type:
             return False, "链接返回的是网页而不是文件，请使用直链而不是分享页面链接"
@@ -171,14 +158,14 @@ def openapi_spec():
         "openapi": "3.0.0",
         "info": {
             "title": "视频音频合并插件",
-            "description": "将视频文件与音频文件合并为带音轨的视频，支持 mp4/mov/webm 视频和 mp3/wav/aac 音频",
-            "version": "1.0.0",
+            "description": "将视频文件与音频文件合并为带音轨的视频，支持 mp4/mov/webm 视频和 mp3/wav/aac 音频。使用方式：先调用 /merge 启动任务获取 task_id，再调用 /status/{task_id} 查询结果。",
+            "version": "2.0.0",
         },
         "servers": [{"url": base_url}],
         "paths": {
             "/merge": {
                 "post": {
-                    "summary": "合并视频和音频",
+                    "summary": "启动视频音频合并任务",
                     "operationId": "mergeVideoAudio",
                     "requestBody": {
                         "required": True,
@@ -218,13 +205,47 @@ def openapi_spec():
                     },
                     "responses": {
                         "200": {
-                            "description": "合并成功，返回下载信息",
+                            "description": "任务已启动",
                             "content": {
                                 "application/json": {
                                     "schema": {
                                         "type": "object",
                                         "properties": {
                                             "status": {"type": "string"},
+                                            "message": {"type": "string"},
+                                            "task_id": {"type": "string"},
+                                        }
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "参数错误"},
+                        "500": {"description": "服务器错误"},
+                    },
+                }
+            },
+            "/status/{task_id}": {
+                "get": {
+                    "summary": "查询合并任务状态",
+                    "operationId": "getTaskStatus",
+                    "parameters": [
+                        {
+                            "name": "task_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "任务ID（由 /merge 接口返回）"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "任务状态",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "description": "processing / success / error"},
                                             "message": {"type": "string"},
                                             "task_id": {"type": "string"},
                                             "video_size_mb": {"type": "number"},
@@ -234,12 +255,33 @@ def openapi_spec():
                                 }
                             },
                         },
-                        "400": {
-                            "description": "参数错误",
+                        "404": {"description": "任务不存在或已过期"},
+                    },
+                }
+            },
+            "/download/{session_id}": {
+                "get": {
+                    "summary": "下载合并后的视频文件",
+                    "operationId": "downloadVideo",
+                    "parameters": [
+                        {
+                            "name": "session_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "任务ID"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "视频文件",
+                            "content": {
+                                "video/mp4": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            },
                         },
-                        "500": {
-                            "description": "合并失败",
-                        },
+                        "404": {"description": "文件不存在或已过期"},
                     },
                 }
             }
@@ -255,28 +297,24 @@ def _do_merge(session_id: str, video_url: str, audio_url: str,
     
     session_dir = WORK_DIR / session_id
     try:
-        # 推断文件扩展名
         video_ext = os.path.splitext(urlparse(video_url).path)[1] or ".mp4"
         audio_ext = os.path.splitext(urlparse(audio_url).path)[1] or ".mp3"
         video_path = session_dir / f"input{video_ext}"
         audio_path = session_dir / f"audio{audio_ext}"
         output_path = session_dir / "output.mp4"
 
-        # 下载视频
         _task_status[session_id]["message"] = "正在下载视频..."
         ok, err = download_file(video_url, str(video_path))
         if not ok:
             _task_status[session_id] = {"status": "error", "message": f"视频下载失败: {err}"}
             return
 
-        # 下载音频
         _task_status[session_id]["message"] = "正在下载音频..."
         ok, err = download_file(audio_url, str(audio_path))
         if not ok:
             _task_status[session_id] = {"status": "error", "message": f"音频下载失败: {err}"}
             return
 
-        # 获取视频时长
         ffprobe = find_ffprobe()
         duration = None
         if ffprobe:
@@ -290,10 +328,8 @@ def _do_merge(session_id: str, video_url: str, audio_url: str,
             except Exception:
                 pass
 
-        # 查找 ffmpeg
         ffmpeg = find_ffmpeg()
 
-        # 构建 FFmpeg 命令
         cmd = [ffmpeg, "-y"]
         cmd.extend(["-i", str(video_path)])
         if loop_audio and duration:
@@ -316,7 +352,6 @@ def _do_merge(session_id: str, video_url: str, audio_url: str,
                      "-c:a", "aac", "-b:a", "192k", "-shortest",
                      "-movflags", "+faststart", str(output_path)])
 
-        # 执行合并
         _task_status[session_id]["message"] = "正在合并视频和音频..."
         process = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
@@ -350,7 +385,7 @@ def _do_merge(session_id: str, video_url: str, audio_url: str,
 
 @app.route("/merge", methods=["POST"])
 def merge_video_audio():
-    """合并视频和音频（同步模式，直接返回结果）"""
+    """合并视频和音频（异步模式，立即返回 task_id）"""
     data = request.get_json(silent=True) or {}
 
     video_url = data.get("videoUrl", "").strip()
@@ -373,15 +408,18 @@ def merge_video_audio():
 
     base_url = request.host_url.rstrip("/")
 
-    # 同步执行合并
-    try:
-        _do_merge(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url)
-        result = _task_status.get(session_id, {})
-        return jsonify(result)
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "合并超时，视频可能过大"}), 500
-    except Exception as e:
-        return jsonify({"error": f"处理异常: {str(e)}"}), 500
+    thread = threading.Thread(
+        target=_do_merge,
+        args=(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url),
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "status": "processing",
+        "message": "任务已启动，请稍后通过 /status/<task_id> 查询结果",
+        "task_id": session_id,
+    })
 
 
 @app.route("/status/<task_id>", methods=["GET"])
