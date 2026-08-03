@@ -165,14 +165,14 @@ def openapi_spec():
         "openapi": "3.0.0",
         "info": {
             "title": "视频音频合并插件",
-            "description": "将视频文件与音频文件合并为带音轨的视频，支持 mp4/mov/webm 视频和 mp3/wav/aac 音频。使用方式：先调用 /merge 启动任务获取 task_id，再调用 /status/{task_id} 查询结果。",
-            "version": "2.0.0",
+            "description": "将视频文件与音频文件合并为带音轨的视频，支持 mp4/mov/webm 视频和 mp3/wav/aac 音频。调用 /merge 直接返回合并结果和视频下载链接。",
+            "version": "3.0.0",
         },
         "servers": [{"url": base_url}],
         "paths": {
             "/merge": {
                 "post": {
-                    "summary": "启动视频音频合并任务",
+                    "summary": "合并视频和音频（同步返回结果）",
                     "operationId": "mergeVideoAudio",
                     "requestBody": {
                         "required": True,
@@ -212,86 +212,27 @@ def openapi_spec():
                     },
                     "responses": {
                         "200": {
-                            "description": "任务已启动",
+                            "description": "合并完成，返回视频下载链接",
                             "content": {
                                 "application/json": {
                                     "schema": {
                                         "type": "object",
                                         "properties": {
-                                            "status": {"type": "string"},
-                                            "message": {"type": "string"},
-                                            "task_id": {"type": "string"},
+                                            "status": {"type": "string", "description": "success 或 error"},
+                                            "message": {"type": "string", "description": "结果描述"},
+                                            "task_id": {"type": "string", "description": "任务ID"},
+                                            "video_size_mb": {"type": "number", "description": "视频文件大小（MB）"},
+                                            "download_url": {"type": "string", "description": "合并后的视频下载链接"},
                                         }
                                     }
                                 }
                             },
                         },
                         "400": {"description": "参数错误"},
-                        "500": {"description": "服务器错误"},
+                        "500": {"description": "合并失败"},
                     },
                 }
             },
-            "/status/{task_id}": {
-                "get": {
-                    "summary": "查询合并任务状态",
-                    "operationId": "getTaskStatus",
-                    "parameters": [
-                        {
-                            "name": "task_id",
-                            "in": "path",
-                            "required": True,
-                            "schema": {"type": "string"},
-                            "description": "任务ID（由 /merge 接口返回）"
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "任务状态",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "status": {"type": "string", "description": "processing / success / error"},
-                                            "message": {"type": "string"},
-                                            "task_id": {"type": "string"},
-                                            "video_size_mb": {"type": "number"},
-                                            "download_url": {"type": "string"},
-                                        }
-                                    }
-                                }
-                            },
-                        },
-                        "404": {"description": "任务不存在或已过期"},
-                    },
-                }
-            },
-            "/download/{session_id}": {
-                "get": {
-                    "summary": "下载合并后的视频文件",
-                    "operationId": "downloadVideo",
-                    "parameters": [
-                        {
-                            "name": "session_id",
-                            "in": "path",
-                            "required": True,
-                            "schema": {"type": "string"},
-                            "description": "任务ID"
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "视频文件",
-                            "content": {
-                                "video/mp4": {
-                                    "schema": {"type": "string", "format": "binary"}
-                                }
-                            },
-                        },
-                        "404": {"description": "文件不存在或已过期"},
-                    },
-                }
-            }
         },
     })
 
@@ -415,18 +356,14 @@ def merge_video_audio():
 
     base_url = request.host_url.rstrip("/")
 
-    thread = threading.Thread(
-        target=_do_merge,
-        args=(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url),
-    )
-    thread.daemon = True
-    thread.start()
+    # 同步执行合并（直接在请求线程中完成，Coze 工作流只需一个节点）
+    try:
+        _do_merge(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url)
+    except Exception as e:
+        return jsonify({"error": f"处理异常: {str(e)}"}), 500
 
-    return jsonify({
-        "status": "processing",
-        "message": "任务已启动，请稍后通过 /status/<task_id> 查询结果",
-        "task_id": session_id,
-    })
+    result = _task_status.get(session_id, {})
+    return jsonify(result)
 
 
 @app.route("/status/<task_id>", methods=["GET"])
