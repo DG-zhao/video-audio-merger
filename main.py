@@ -8,6 +8,7 @@ import uuid
 import shutil
 import subprocess
 import tempfile
+import threading
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -21,6 +22,8 @@ WORK_DIR = Path(__file__).parent / "work"
 WORK_DIR.mkdir(exist_ok=True)
 
 # 鏈€澶ф枃浠跺ぇ灏忥紙500MB锛?MAX_DOWNLOAD_SIZE = 500 * 1024 * 1024
+
+# 寮傛浠诲姟鐘舵€佸瓨鍌?_task_status: dict = {}  # task_id -> {"status": "processing|success|error", "data": ...}
 
 
 def find_ffmpeg():
@@ -53,6 +56,20 @@ def find_ffmpeg():
         if p.exists():
             return str(p)
     return None
+
+
+def find_ffprobe():
+    """鏌ユ壘 ffprobe 璺緞"""
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return None
+    ffprobe = ffmpeg_path.replace("ffmpeg", "ffprobe")
+    if ffprobe != ffmpeg_path and os.path.exists(ffprobe):
+        return ffprobe
+    ffprobe = ffmpeg_path.replace("ffmpeg.exe", "ffprobe.exe")
+    if os.path.exists(ffprobe):
+        return ffprobe
+    return shutil.which("ffprobe")
 
 
 def resolve_storage_to_url(share_url: str) -> str:
@@ -221,9 +238,109 @@ def openapi_spec():
     })
 
 
+def _do_merge(session_id: str, video_url: str, audio_url: str,
+              audio_volume: float, video_volume: float, loop_audio: bool,
+              base_url: str):
+    """鍚庡彴绾跨▼鎵ц鍚堝苟浠诲姟"""
+    _task_status[session_id] = {"status": "processing", "message": "寮€濮嬪鐞?.."}
+    
+    session_dir = WORK_DIR / session_id
+    try:
+        # 鎺ㄦ柇鏂囦欢鎵╁睍鍚?        video_ext = os.path.splitext(urlparse(video_url).path)[1] or ".mp4"
+        audio_ext = os.path.splitext(urlparse(audio_url).path)[1] or ".mp3"
+        video_path = session_dir / f"input{video_ext}"
+        audio_path = session_dir / f"audio{audio_ext}"
+        output_path = session_dir / "output.mp4"
+
+        # 涓嬭浇瑙嗛
+        _task_status[session_id]["message"] = "姝ｅ湪涓嬭浇瑙嗛..."
+        ok, err = download_file(video_url, str(video_path))
+        if not ok:
+            _task_status[session_id] = {"status": "error", "message": f"瑙嗛涓嬭浇澶辫触: {err}"}
+            return
+
+        # 涓嬭浇闊抽
+        _task_status[session_id]["message"] = "姝ｅ湪涓嬭浇闊抽..."
+        ok, err = download_file(audio_url, str(audio_path))
+        if not ok:
+            _task_status[session_id] = {"status": "error", "message": f"闊抽涓嬭浇澶辫触: {err}"}
+            return
+
+        # 鑾峰彇瑙嗛鏃堕暱
+        ffprobe = find_ffprobe()
+        duration = None
+        if ffprobe:
+            try:
+                result = subprocess.run(
+                    [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                duration = float(result.stdout.strip())
+            except Exception:
+                pass
+
+        # 鏌ユ壘 ffmpeg
+        ffmpeg = find_ffmpeg()
+
+        # 鏋勫缓 FFmpeg 鍛戒护
+        cmd = [ffmpeg, "-y"]
+        cmd.extend(["-i", str(video_path)])
+        if loop_audio and duration:
+            cmd.extend(["-stream_loop", "-1", "-i", str(audio_path)])
+            cmd.extend(["-t", str(duration)])
+        else:
+            cmd.extend(["-i", str(audio_path)])
+
+        if video_volume > 0:
+            filter_complex = (
+                f"[0:a]volume={video_volume}[v];"
+                f"[1:a]volume={audio_volume}[a];"
+                f"[v][a]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            )
+            cmd.extend(["-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[out]"])
+        else:
+            cmd.extend(["-filter_complex", f"[1:a]volume={audio_volume}[out]", "-map", "0:v:0", "-map", "[out]"])
+
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                     "-c:a", "aac", "-b:a", "192k", "-shortest",
+                     "-movflags", "+faststart", str(output_path)])
+
+        # 鎵ц鍚堝苟
+        _task_status[session_id]["message"] = "姝ｅ湪鍚堝苟瑙嗛鍜岄煶棰?.."
+        process = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if process.returncode != 0:
+            _task_status[session_id] = {
+                "status": "error",
+                "message": "FFmpeg 鍚堝苟澶辫触",
+                "ffmpeg_stderr": process.stderr[-500:],
+            }
+            return
+
+        if not output_path.exists():
+            _task_status[session_id] = {"status": "error", "message": "鍚堝苟鍚庢湭鐢熸垚杈撳嚭鏂囦欢"}
+            return
+
+        video_size = output_path.stat().st_size
+        download_url = f"{base_url}/download/{session_id}"
+        _task_status[session_id] = {
+            "status": "success",
+            "message": "瑙嗛闊抽鍚堝苟鎴愬姛",
+            "task_id": session_id,
+            "video_size_mb": round(video_size / (1024 * 1024), 2),
+            "download_url": download_url,
+        }
+
+    except subprocess.TimeoutExpired:
+        _task_status[session_id] = {"status": "error", "message": "鍚堝苟瓒呮椂锛岃棰戝彲鑳借繃澶?}
+    except Exception as e:
+        _task_status[session_id] = {"status": "error", "message": f"澶勭悊寮傚父: {str(e)}"}
+
+
 @app.route("/merge", methods=["POST"])
 def merge_video_audio():
-    """涓绘帴鍙ｏ細鍚堝苟瑙嗛鍜岄煶棰?""
+    """寮傛鍚堝苟瑙嗛鍜岄煶棰戯紙绔嬪嵆杩斿洖锛屽悗鍙板鐞嗭級"""
     data = request.get_json(silent=True) or {}
 
     video_url = data.get("videoUrl", "").strip()
@@ -232,139 +349,44 @@ def merge_video_audio():
     if not video_url or not audio_url:
         return jsonify({"error": "videoUrl 鍜?audioUrl 涓哄繀濉弬鏁?}), 400
 
-    # 鏌ユ壘 ffmpeg
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        return jsonify({
-            "error": "鏈嶅姟鍣ㄦ湭瀹夎 FFmpeg锛岃鍏堝畨瑁?,
-            "install_hint": "winget install Gyan.FFmpeg",
-        }), 500
+        return jsonify({"error": "鏈嶅姟鍣ㄦ湭瀹夎 FFmpeg"}), 500
 
-    audio_volume = float(data.get("audioVolume", 1.0))
-    video_volume = float(data.get("videoVolume", 0.3))
+    audio_volume = max(0.0, min(2.0, float(data.get("audioVolume", 1.0))))
+    video_volume = max(0.0, min(2.0, float(data.get("videoVolume", 0.3))))
     loop_audio = data.get("loopAudio", True)
-
-    # 闄愬埗闊抽噺鑼冨洿
-    audio_volume = max(0.0, min(2.0, audio_volume))
-    video_volume = max(0.0, min(2.0, video_volume))
 
     session_id = uuid.uuid4().hex[:8]
     session_dir = WORK_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # 鎺ㄦ柇鏂囦欢鎵╁睍鍚?    video_ext = os.path.splitext(urlparse(video_url).path)[1] or ".mp4"
-    audio_ext = os.path.splitext(urlparse(audio_url).path)[1] or ".mp3"
+    base_url = request.host_url.rstrip("/")
 
-    video_path = session_dir / f"input{video_ext}"
-    audio_path = session_dir / f"audio{audio_ext}"
-    output_path = session_dir / "output.mp4"
+    # 鍚姩鍚庡彴绾跨▼
+    t = threading.Thread(
+        target=_do_merge,
+        args=(session_id, video_url, audio_url, audio_volume, video_volume, loop_audio, base_url),
+        daemon=True,
+    )
+    t.start()
 
-    try:
-        # 涓嬭浇瑙嗛
-        ok, err = download_file(video_url, str(video_path))
-        if not ok:
-            return jsonify({"error": f"瑙嗛涓嬭浇澶辫触: {err}", "url": video_url}), 500
+    # 绔嬪嵆杩斿洖
+    return jsonify({
+        "status": "processing",
+        "message": "浠诲姟宸叉帴鏀讹紝姝ｅ湪鍚庡彴澶勭悊",
+        "task_id": session_id,
+        "status_url": f"{base_url}/status/{session_id}",
+    })
 
-        # 涓嬭浇闊抽
-        ok, err = download_file(audio_url, str(audio_path))
-        if not ok:
-            return jsonify({"error": f"闊抽涓嬭浇澶辫触: {err}", "url": audio_url}), 500
 
-        # 鑾峰彇瑙嗛鏃堕暱锛堢敤浜庨煶棰戝惊鐜級
-        probe_cmd = [
-            ffmpeg, "-i", str(video_path),
-            "-show_entries", "format=duration",
-            "-v", "quiet", "-of", "csv=p=0",
-            "-f", "null", "-",
-        ]
-        # 鐢?ffprobe 鑾峰彇鏃堕暱
-        ffprobe = ffmpeg.replace("ffmpeg", "ffprobe")
-        if not os.path.exists(ffprobe):
-            ffprobe = ffmpeg.replace("ffmpeg.exe", "ffprobe.exe")
-
-        duration = None
-        try:
-            result = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            duration = float(result.stdout.strip())
-        except Exception:
-            pass
-
-        # 鏋勫缓 FFmpeg 鍛戒护
-        # 绛栫暐锛氳棰戠敾闈繚鐣欙紝瑙嗛鍘熷０ + BGM 娣峰悎
-        cmd = [ffmpeg, "-y"]
-
-        # 杈撳叆1锛氳棰?        cmd.extend(["-i", str(video_path)])
-
-        # 杈撳叆2锛氶煶棰?        if loop_audio and duration:
-            # 浣跨敤 stream_loop 寰幆闊抽
-            cmd.extend(["-stream_loop", "-1", "-i", str(audio_path)])
-            cmd.extend(["-t", str(duration)])
-        else:
-            cmd.extend(["-i", str(audio_path)])
-
-        # 婊ら暅锛氭贩鍚堣棰戝師澹板拰BGM
-        if video_volume > 0:
-            # [0:a]瑙嗛鍘熷０ [1:a]BGM锛屾贩鍚堜袱璺?            filter_complex = (
-                f"[0:a]volume={video_volume}[v];"
-                f"[1:a]volume={audio_volume}[a];"
-                f"[v][a]amix=inputs=2:duration=first:dropout_transition=2[out]"
-            )
-            cmd.extend([
-                "-filter_complex", filter_complex,
-                "-map", "0:v:0",
-                "-map", "[out]",
-            ])
-        else:
-            # 瑙嗛鍘熷０瀹屽叏闈欓煶锛屽彧鐢˙GM
-            cmd.extend([
-                "-filter_complex", f"[1:a]volume={audio_volume}[out]",
-                "-map", "0:v:0",
-                "-map", "[out]",
-            ])
-
-        cmd.extend([
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-shortest",
-            "-movflags", "+faststart",
-            str(output_path),
-        ])
-
-        # 鎵ц鍚堝苟
-        process = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-        if process.returncode != 0:
-            return jsonify({
-                "error": "FFmpeg 鍚堝苟澶辫触",
-                "ffmpeg_stderr": process.stderr[-1000:],
-            }), 500
-
-        if not output_path.exists():
-            return jsonify({"error": "鍚堝苟鍚庢湭鐢熸垚杈撳嚭鏂囦欢"}), 500
-
-        # 杩斿洖 JSON锛屽寘鍚笅杞介摼鎺ワ紙Coze 鎻掍欢闇€瑕佺粨鏋勫寲鍝嶅簲锛?        video_size = output_path.stat().st_size
-        download_url = f"{request.host_url.rstrip('/')}/download/{session_id}"
-        return jsonify({
-            "status": "success",
-            "message": "瑙嗛闊抽鍚堝苟鎴愬姛",
-            "task_id": session_id,
-            "video_size_mb": round(video_size / (1024 * 1024), 2),
-            "download_url": download_url,
-        })
-
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "鍚堝苟瓒呮椂锛岃棰戝彲鑳借繃澶?}), 500
-    except Exception as e:
-        return jsonify({"error": f"澶勭悊寮傚父: {str(e)}"}), 500
-    finally:
-        # 娓呯悊涓存椂鏂囦欢锛堝彲閫夛紝淇濈暀鏂逛究璋冭瘯锛?        pass
+@app.route("/status/<task_id>", methods=["GET"])
+def task_status(task_id):
+    """鏌ヨ寮傛浠诲姟鐘舵€?""
+    info = _task_status.get(task_id)
+    if not info:
+        return jsonify({"error": "浠诲姟涓嶅瓨鍦ㄦ垨宸茶繃鏈?}), 404
+    return jsonify(info)
 
 
 @app.route("/download/<session_id>", methods=["GET"])
