@@ -74,29 +74,36 @@ def find_ffprobe():
 
 def resolve_storage_to_url(share_url: str) -> str:
     """
-    解析 storage.to 分享链接，返回 stusercontent.com 直链。
-    如果链接不是 storage.to 或解析失败，返回原 URL。
+    解析分享链接为直链。
+    支持 storage.to 和 tmpfiles.org。
+    如果链接不是已知分享站或解析失败，返回原 URL。
     """
     try:
         parsed = urlparse(share_url)
-        if "storage.to" not in parsed.netloc:
-            return share_url
+        hostname = parsed.netloc.lower()
 
-        resp = requests.get(share_url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        resp.raise_for_status()
-        html = resp.text
+        # storage.to
+        if "storage.to" in hostname:
+            resp = requests.get(share_url, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            resp.raise_for_status()
+            html = resp.text
+            pattern = r'stusercontent\.com/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\?[^"\'<>\s]+)'
+            matches = re.findall(pattern, html)
+            if not matches:
+                return share_url
+            dirty_url = matches[0]
+            clean_url = dirty_url.replace("\\u0026", "&").replace("&amp;", "&")
+            return f"https://stusercontent.com/{clean_url}"
 
-        pattern = r'stusercontent\.com/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\?[^"\'<>\s]+)'
-        matches = re.findall(pattern, html)
-        if not matches:
-            return share_url
+        # tmpfiles.org - 直链格式: /dl/xxx/filename
+        if "tmpfiles.org" in hostname:
+            path = parsed.path
+            if path.startswith("/") and not path.startswith("/dl/"):
+                return f"https://{hostname}/dl{path}"
 
-        dirty_url = matches[0]
-        clean_url = dirty_url.replace("\\u0026", "&").replace("&amp;", "&")
-        direct_url = f"https://stusercontent.com/{clean_url}"
-        return direct_url
+        return share_url
     except Exception:
         return share_url
 
@@ -107,7 +114,7 @@ def download_file(url: str, dest: str) -> tuple:
     try:
         actual_url = resolve_storage_to_url(url)
         if actual_url != url:
-            print(f"[INFO] 已解析 storage.to 直链: {actual_url[:80]}...")
+            print(f"[INFO] 已解析分享链接为直链: {actual_url[:80]}...")
 
         resp = requests.get(actual_url, stream=True, timeout=300, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
