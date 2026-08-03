@@ -1,8 +1,1 @@
-work/
-__pycache__/
-*.pyc
-.env
-*.bat
-*.txt
-*.zip
-README.md
+work/\n__pycache__/\n*.pyc\n.env\n*.bat\nserveo_output.txt\ntunnel_output.txt\n*.zip\nREADME.md
